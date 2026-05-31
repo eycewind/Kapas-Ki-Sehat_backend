@@ -1,14 +1,15 @@
 import os
-from dotenv import load_model, load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel                       # <-- MAKE SURE THIS LINE IS PRESENT
+from typing import Dict, Any, Optional
+from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # Explicitly load the local .env variables at runtime booting
 load_dotenv()
 
 app = FastAPI(title="Kapas Ki Sehat - Walking Skeleton Backend")
-
 # ... (Keep your CORS middleware configuration block exactly here) ...
 
 # =====================================================================
