@@ -1,50 +1,82 @@
+import os
+from dotenv import load_model, load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, Any, Optional
-import asyncio
+from supabase import create_client, Client
+
+# Explicitly load the local .env variables at runtime booting
+load_dotenv()
 
 app = FastAPI(title="Kapas Ki Sehat - Walking Skeleton Backend")
 
-# Enable CORS so your local physical phone can securely talk to your computer's IP
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ... (Keep your CORS middleware configuration block exactly here) ...
+
+# =====================================================================
+# SECURE SUPABASE CLIENT INITIALIZATION
+# =====================================================================
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("[CRITICAL WARNING] Missing environment configuration variables inside your .env configuration bundle!")
+
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # =====================================================================
 # Pydantic Schemas
 # =====================================================================
 class SupabaseWebhookPayload(BaseModel):
-    type: Optional[str] = "INSERT"                    # Default fallback
-    table: Optional[str] = "diagnostic_logs"           # Default fallback
+    type: Optional[str] = "INSERT"
+    table: Optional[str] = "diagnostic_logs"
     schema_name: Optional[str] = "public"
-    record: Dict[str, Any]                             # The raw database row row object
+    record: Dict[str, Any]
     old_record: Optional[Dict[str, Any]] = None
 
 # =====================================================================
-# Asynchronous Background Tasks
+# Asynchronous Background Tasks (The Stub ML Model Loop)
 # =====================================================================
 async def run_gatekeeper_verification(record: dict):
-    print(f"\n[MLOPS EVENT] Low confidence alert detected. Initializing Gatekeeper data harvesting loop for row ID: {record.get('id')}\n")
-    # Google AI Studio / Gemini API validation sequence to be appended here
+    row_id = record.get('id')
+    print(f"\n[MLOPS EVENT] Waking background thread worker for row ID: {row_id}")
+    
+    # 1. SIMULATE STUB ML MODEL PROCESSING DELAY
+    # Tweaking parameters to mimic a small edge network evaluation pass
+    await asyncio.sleep(2.0)
+    
+    # 2. RUN LIGHTWEIGHT STUB MODEL EVALUATION
+    # Generating standard deterministic outputs to simulate model inferences safely
+    simulated_confidence = 0.84
+    simulated_pest = "Whitefly Nymphs Detected"
+    simulated_risk = "CRITICAL"
+    
+    print(f"[MLOPS EVENT] Stub Model processing complete. Writing analytical inferences back to cloud repository...")
+
+    try:
+        # 3. LIVE DATABASE WRITE-BACK STEP
+        # This targets the exact row ID that triggered the webhook and fills the metrics
+        response = supabase_client.table("diagnostic_logs").update({
+            "confidence_score": simulated_confidence,
+            "risk_level": simulated_risk,
+            "detected_anomaly": simulated_pest # If your schema requires this, or map to whitefly_count
+        }).eq("id", row_id).execute()
+        
+        print(f"[MLOPS EVENT] Database sync state updated successfully for ID: {row_id}!\n")
+        
+    except Exception as e:
+        print(f"[CRITICAL ERR] Write-back transaction failed to push downstream: {str(e)}\n")
 
 # =====================================================================
 # API Endpoints & Webhooks
 # =====================================================================
-
 @app.get("/")
 def read_root():
     return {"status": "online", "message": "Kapas Ki Sehat API is fully operational Core Sandbox"}
 
-# NEW: Event-Driven Supabase Webhook Receiver
 @app.post("/api/v1/supabase-webhook")
 async def handle_supabase_webhook(payload: SupabaseWebhookPayload, background_tasks: BackgroundTasks):
     if payload.type == "INSERT" and payload.table == "diagnostic_logs":
         confidence = float(payload.record.get("confidence_score", 1.0))
+        # If confidence is low, hand it off to our asynchronous Stub ML worker background thread
         if confidence < 0.75:
             background_tasks.add_task(run_gatekeeper_verification, payload.record)
     return {"status": "accepted", "message": "Payload queued for system execution processing"}
@@ -52,7 +84,6 @@ async def handle_supabase_webhook(payload: SupabaseWebhookPayload, background_ta
 # 1. THE DISTRICT RISK UPDATE ENDPOINT
 @app.get("/api/v1/risk-metrics")
 def get_risk_metrics(district: str = "Multan"):
-    # Simulating a live database read for the district dashboard metrics
     return {
         "district": district.upper(),
         "temperature": "37°C",
@@ -66,13 +97,8 @@ def get_risk_metrics(district: str = "Multan"):
 # 2. THE IMAGE SCAN & INFERENCE ENDPOINT
 @app.post("/api/v1/scan")
 async def process_crop_scan(file: UploadFile = File(...)):
-    # Read the file data into memory to simulate local network load
     contents = await file.read()
-    
-    # Simulate hardware/ML inference delay (1.5 seconds) so your app loading spinner works realistically
     await asyncio.sleep(1.5)
-    
-    # Return a mock payload mirroring what the final computer vision model will output
     return {
         "status": "success",
         "filename": file.filename,
@@ -86,8 +112,6 @@ async def process_crop_scan(file: UploadFile = File(...)):
 @app.post("/api/v1/chat")
 async def chatbot_triage(message: str = Form(...), language: str = Form("ur")):
     await asyncio.sleep(0.5)
-    
-    # Basic structural interceptor mimicking primitive matching logic
     clean_msg = message.strip()
     if "مکھی" in clean_msg or "سفید" in clean_msg:
         reply = "سفید مکھی کے تدارک کے لیے محکمہ زراعت کی تجویز کردہ کیمیکلز کا سپرے صبح یا شام کے وقت کریں۔"
@@ -95,5 +119,4 @@ async def chatbot_triage(message: str = Form(...), language: str = Form("ur")):
         reply = "شدید گرمی کی لہر کے دوران کپاس کی فصل کو ہلکا پانی لگائیں، تا کہ نمی برقرار رہے ۔"
     else:
         reply = "آپ کا سوال موصول ہو گیا ہے۔ ہماری معلوماتی ڈیٹا بیس کے مطابق کپاس کی صحت برقرار رکھنے کے لیے باقاعدہ معائنہ ضروری ہے۔"
-        
     return {"reply": reply}
