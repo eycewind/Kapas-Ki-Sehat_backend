@@ -7,7 +7,7 @@ from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel                       # <-- MAKE SURE THIS LINE IS PRESENT
+from pydantic import BaseModel, Field, ConfigDict    # <-- MAKE SURE THIS LINE IS PRESENT
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -16,7 +16,18 @@ from supabase import create_client, Client
 load_dotenv()
 
 app = FastAPI(title="Kapas Ki Sehat - Walking Skeleton Backend")
-# ... (Keep your CORS middleware configuration block exactly here) ...
+
+# CORS — the Next.js dashboard calls this API from the browser.
+# Permissive for local/dev; tighten allow_origins to the dashboard origin(s)
+# (e.g. via a CORS_ALLOW_ORIGINS env var) before production.
+_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins.split(",")] if _cors_origins != "*" else ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =====================================================================
 # LIVE PYTORCH MODEL INITIALIZATION
@@ -28,8 +39,9 @@ CLASSES = ['Fresh_Leaf', 'Leaf_Reddening', 'Leaf_Spot_Bacterial_Blight', 'Yellow
 model = mobilenet_v2(weights=None)
 model.classifier[1] = torch.nn.Linear(model.last_channel, len(CLASSES))
 
-# Load the weights you just trained on your RTX 4060
-MODEL_PATH = r"D:\work\agri-pakistan\cot-ad1\cottonace_stub.pth"
+# Load the weights you just trained on your RTX 4060.
+# Path comes from .env (MODEL_PATH) so it isn't tied to one machine.
+MODEL_PATH = os.getenv("MODEL_PATH", os.path.join("models", "cottonace_stub.pth"))
 if os.path.exists(MODEL_PATH):
     # 1. Read the full metadata dictionary from the file
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
@@ -60,50 +72,114 @@ inference_transforms = transforms.Compose([
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+# Storage bucket that holds the leaf images referenced by diagnostic_logs.image_storage_path.
+# Override in .env if your bucket is named differently.
+STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "leaf-images")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[CRITICAL WARNING] Missing environment configuration variables inside your .env configuration bundle!")
 
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
+def download_leaf_image(storage_path: str) -> bytes:
+    """Fetch raw image bytes from Supabase Storage for a diagnostic_logs row.
+
+    Tolerates three shapes the mobile app might store in image_storage_path:
+      - a bare object key:            "uploads/abc.jpg"
+      - a key prefixed with bucket:   "leaf-images/uploads/abc.jpg"
+      - a full public/signed URL:     "https://.../object/public/leaf-images/uploads/abc.jpg"
+    """
+    path = (storage_path or "").strip()
+
+    if path.startswith("http"):
+        marker = f"/{STORAGE_BUCKET}/"
+        if marker in path:
+            path = path.split(marker, 1)[1]
+        # strip any signed-URL query string
+        path = path.split("?", 1)[0]
+    elif path.startswith(f"{STORAGE_BUCKET}/"):
+        path = path[len(STORAGE_BUCKET) + 1:]
+
+    return supabase_client.storage.from_(STORAGE_BUCKET).download(path)
+
 # =====================================================================
 # Pydantic Schemas
 # =====================================================================
 class SupabaseWebhookPayload(BaseModel):
+    # Supabase sends the key "schema" (not "schema_name"); alias maps it.
+    # populate_by_name lets either spelling parse, for resilience.
+    model_config = ConfigDict(populate_by_name=True)
+
     type: Optional[str] = "INSERT"
     table: Optional[str] = "diagnostic_logs"
-    schema_name: Optional[str] = "public"
+    schema_name: Optional[str] = Field(default="public", alias="schema")
     record: Dict[str, Any]
     old_record: Optional[Dict[str, Any]] = None
+
+# =====================================================================
+# CANONICAL RISK LEVEL (see CONTRACTS.md §4)
+# =====================================================================
+def derive_risk_level(whitefly_count) -> str:
+    """Map whitefly_count → canonical risk_level band (LOW/MEDIUM/HIGH/CRITICAL)."""
+    try:
+        count = int(whitefly_count)
+    except (TypeError, ValueError):
+        return "LOW"
+    if count >= 16:
+        return "CRITICAL"
+    if count >= 9:
+        return "HIGH"
+    if count >= 5:
+        return "MEDIUM"
+    return "LOW"
 
 # =====================================================================
 # ASYNCHRONOUS HIGH-FIDELITY TRIAGE WORKER
 # =====================================================================
 async def run_gatekeeper_verification(record: dict):
     row_id = record.get("id")
-    image_url = record.get("image_url") # Assuming your mobile app stores the image path/URL here
+    image_storage_path = record.get("image_storage_path") # Path within the Supabase storage bucket (actual column name)
     
     print(f"[MLOPS LIVE] Executing deep high-fidelity verification pass for row ID: {row_id}")
-    
+
+    # Without the actual leaf image there is nothing to verify. Bail out rather
+    # than fabricate a result over the farmer's real edge-device values.
+    if not image_storage_path:
+        print(f"⚠️ [MLOPS SKIP] Row {row_id} has no image_storage_path; leaving edge values untouched.")
+        return
+
     try:
-        # 1. Fallback placeholder prediction if image processing isn't fully pulled yet
-        # (Instead of sleeping, we compute real tensor probabilities)
-        mock_tensor = torch.randn(1, 3, 224, 224).to(DEVICE)
+        # 1. Pull the real leaf image the farmer uploaded and run it through the model
+        image_bytes = download_leaf_image(image_storage_path)
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        tensor = inference_transforms(image).unsqueeze(0).to(DEVICE)
+
         with torch.no_grad():
-            outputs = model(mock_tensor)
+            outputs = model(tensor)
             probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
             top_prob, top_idx = torch.max(probabilities, dim=0)
-        
+
         final_confidence = float(top_prob.item())
         predicted_class = CLASSES[top_idx.item()]
-        
-        # Enforce severe risk metrics matching standard outbreak categories
-        derived_risk = "CRITICAL" if predicted_class != "Fresh_Leaf" else "LOW"
-        
-        # 2. Write back the live ML model results straight to Supabase Cloud Storage
+
+        # Canonical risk_level (§4): a healthy leaf is LOW; otherwise severity
+        # scales with whitefly_count using the canonical bands.
+        # NOTE: the image model is a classifier and does not itself count
+        # whiteflies, so risk is derived from record["whitefly_count"].
+        # (Nuance flagged for the next MASTER-CONTRACTS refresh.)
+        if predicted_class == "Fresh_Leaf":
+            derived_risk = "LOW"
+        else:
+            derived_risk = derive_risk_level(record.get("whitefly_count"))
+
+        # 2. Write the higher-fidelity result back to the diagnostic_logs row.
+        # NOTE: diagnostic_logs has no `status` column — writing one raises
+        # PGRST204 and (because of the except below) silently drops the whole
+        # update. Only write columns that actually exist in the schema.
         supabase_client.table("diagnostic_logs").update({
             "confidence_score": round(final_confidence, 2),
-            "risk_level": derived_risk,
-            "status": f"Verified by {predicted_class}"
+            "risk_level": derived_risk
         }).eq("id", row_id).execute()
         
         print(f"✅ [DATABASE SYNC SUCCESS] Row {row_id} mapped to {predicted_class} with {final_confidence:.2f} confidence.")
@@ -151,8 +227,6 @@ def get_risk_metrics(district: str = "Multan"):
         "alert_text_en": "High risk of Whitefly expansion due to continuous dry heat wave.",
         "alert_text_ur": "سنگین خطرہ: مسلسل خشک گرمی کی وجہ سے سفید مکھی کا پھیلاؤ کا زیادہ خطرہ۔"
     }
-
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks # Ensure Form is imported
 
 # =====================================================================
 # MOBILE PHONE SCAN INFERENCE ENDPOINT (WITH GPS TELEMETRY)
