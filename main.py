@@ -15,6 +15,10 @@ from supabase import create_client, Client
 # Explicitly load the local .env variables at runtime booting
 load_dotenv()
 
+# Ensure emoji print() calls don't crash on Windows cp1252 consoles
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
+
 app = FastAPI(title="Kapas Ki Sehat - Walking Skeleton Backend")
 
 # CORS — the Next.js dashboard calls this API from the browser.
@@ -76,10 +80,23 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 # Override in .env if your bucket is named differently.
 STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "leaf-images")
 
+# Optional service-role key for downloading from private Storage buckets.
+# If unset, falls back to the anon key (works for public buckets only).
+# Set SUPABASE_SERVICE_KEY in .env once you create the leaf-images bucket.
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[CRITICAL WARNING] Missing environment configuration variables inside your .env configuration bundle!")
 
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Dedicated client for Storage reads — uses service-role key when available
+# so the gatekeeper can download from a private bucket. Anon key is the fallback.
+_storage_client: Client = (
+    create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    if SUPABASE_SERVICE_KEY
+    else supabase_client
+)
 
 
 def download_leaf_image(storage_path: str) -> bytes:
@@ -101,11 +118,15 @@ def download_leaf_image(storage_path: str) -> bytes:
     elif path.startswith(f"{STORAGE_BUCKET}/"):
         path = path[len(STORAGE_BUCKET) + 1:]
 
-    return supabase_client.storage.from_(STORAGE_BUCKET).download(path)
+    return _storage_client.storage.from_(STORAGE_BUCKET).download(path)
 
 # =====================================================================
 # Pydantic Schemas
 # =====================================================================
+class ChatRequest(BaseModel):
+    message: str
+    language: str = "ur"    # canonical language code (§5): ur | pa | skr | en
+
 class SupabaseWebhookPayload(BaseModel):
     # Supabase sends the key "schema" (not "schema_name"); alias maps it.
     # populate_by_name lets either spelling parse, for resilience.
@@ -216,14 +237,16 @@ async def handle_supabase_webhook(payload: SupabaseWebhookPayload, background_ta
     return {"status": "accepted", "message": "Payload queued for system execution processing"}
 
 # 1. THE DISTRICT RISK UPDATE ENDPOINT
+# Returns canonical numeric fields + risk_level enum (§3.3, §4).
+# Values are stubs until this endpoint is wired to real weather/telemetry data.
 @app.get("/api/v1/risk-metrics")
 def get_risk_metrics(district: str = "Multan"):
     return {
         "district": district.upper(),
-        "temperature": "37°C",
-        "humidity": "42%",
-        "wind_speed": "14 km/h",
-        "risk_level": "CRITICAL WHITEFLY RISK",
+        "temperature": 37.0,          # °C — stub
+        "humidity": 42.0,             # % — stub
+        "wind_speed": 14.0,           # km/h — stub
+        "risk_level": "CRITICAL",     # canonical enum (§4) — stub
         "alert_text_en": "High risk of Whitefly expansion due to continuous dry heat wave.",
         "alert_text_ur": "سنگین خطرہ: مسلسل خشک گرمی کی وجہ سے سفید مکھی کا پھیلاؤ کا زیادہ خطرہ۔"
     }
@@ -291,10 +314,11 @@ async def process_crop_scan(
         return {"status": "error", "message": str(e)}
 
 # 3. THE LEVEL 1 SUPPORT CHATBOT ENDPOINT
+# Accepts a JSON body (§3.4): {"message": "...", "language": "ur"}
 @app.post("/api/v1/chat")
-async def chatbot_triage(message: str = Form(...), language: str = Form("ur")):
+async def chatbot_triage(body: ChatRequest):
     await asyncio.sleep(0.5)
-    clean_msg = message.strip()
+    clean_msg = body.message.strip()
     if "مکھی" in clean_msg or "سفید" in clean_msg:
         reply = "سفید مکھی کے تدارک کے لیے محکمہ زراعت کی تجویز کردہ کیمیکلز کا سپرے صبح یا شام کے وقت کریں۔"
     elif "پانی" in clean_msg or "آبپاشی" in clean_msg:
