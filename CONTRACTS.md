@@ -222,9 +222,8 @@ Unknown/non-canonical → gray `#9CA3AF` (dashboard).
 → `LOW`; else by count band.
 
 - App ✅ · Backend gatekeeper ✅ · Dashboard ✅ — all implemented correctly.
-- ⚠️ **Functionally binary right now:** because `/scan` hardcodes `whitefly_count=12`,
-  `derive_risk_level` always returns `HIGH` for pest and `LOW` for healthy.
-  `MEDIUM`/`CRITICAL` cannot occur until §11 [W1] is fixed. Confirmed in live data.
+- ✅ **All four bands now reachable:** `estimate_whitefly_count(class, confidence)`
+  maps to 0/3/6/12/18, producing LOW/MEDIUM/HIGH/CRITICAL from `derive_risk_level()`.
 - DB: `risk_level varchar` unconstrained — recommend a CHECK constraint.
 
 > **If §11 Option C is chosen**, this derivation rule changes — update §4 in
@@ -329,10 +328,10 @@ Two coexisting key systems exist in Supabase projects:
 ### ⚠️ Outstanding backend items
 | Ref | Item | Status |
 |-----|------|--------|
-| [W1] 🔴 | `/scan` `whitefly_count` hardcoded `12` | **§11 work item — needs option decision first** |
+| [W1] ✅ | `/scan` `whitefly_count` now derived via `estimate_whitefly_count(class, confidence)` — Option B; all 4 risk bands reachable | Fixed |
+| [H1] ✅ | GPS `Form(None)` — sends `null` when unavailable, not `0.0` | Fixed |
+| [H2] ✅ | `recommendation_en` = "Apply targeted mitigation spray in morning or evening." | Fixed |
 | [B1] 🟠 | `SUPABASE_KEY` is JWT ✅ but is the **service_role** key, not anon. Bypasses RLS on DB calls. `SUPABASE_SERVICE_KEY` not yet set separately. Storage reads work in practice. Swap to anon JWT + set service key before enforcing RLS. | Manual `.env` edit; see §8.1 |
-| [H1] 🟠 | GPS defaults `0.0` in `/scan` | Unblocked; bundle with [W1] edit |
-| [H2] 🟠 | `recommendation_en` wording | Unblocked; bundle with [W1] edit |
 | [X1] 🟡 | In-memory dedup lost on restart; no webhook sig check | Hygiene |
 | [X4] 🟡 | `.env` credentials gitignored + rotated | Hygiene |
 
@@ -346,13 +345,13 @@ Two coexisting key systems exist in Supabase projects:
 | `model_deployments` flat columns | n/a | ✅ | ✅ |
 | Webhook `schema` key | n/a | ✅ | ⚠️ orphaned `main.py` in dashboard — delete it |
 | Risk enum 4-level implemented | ✅ | ✅ | ✅ |
-| Risk enum receives varied input | 🔴 starved (count=12) | 🔴 source of stub | 🔴 shows only HIGH/LOW |
+| Risk enum receives varied input | ✅ syncs real value | ✅ Option B — all 4 bands reachable | ✅ will show all 4 |
 | `/risk-metrics` numeric + canonical | not consumed | ✅ | not consumed |
 | `/chat` JSON body | not consumed | ✅ | not consumed |
-| GPS `null` not `0.0` | ✅ | 🟠 held [H1] | ✅ |
+| GPS `null` not `0.0` | ✅ | ✅ [H1] fixed | ✅ |
 | Image upload + gatekeeper | ✅ verified live | ✅ verified live | reflects updates |
 | Real `confidence_score` | ✅ | ✅ | ✅ |
-| Real `whitefly_count` | ✅ syncs what it gets | 🔴 hardcodes 12 | reads value |
+| Real `whitefly_count` | ✅ syncs what it gets | ✅ Option B derived | reads value |
 | Real `inference_time_ms` | ✅ | n/a | n/a |
 | `preferred_language` code | ✅ | `ur` only | n/a |
 | Config externalized | ✅ | ✅ | ✅ |
@@ -368,16 +367,26 @@ Two coexisting key systems exist in Supabase projects:
 `HIGH`. Every healthy scan → `LOW`. `MEDIUM`/`CRITICAL` are unreachable. The
 4-level enum all three repos built is functionally binary until this is fixed.
 
-### ⚠️ Decision required BEFORE coding — pick one option
+### ✅ Decision: Option B — map `(class, confidence)` → representative count
 
-| Option | Approach | Effort | Notes |
-|--------|----------|--------|-------|
-| **A** | Add a detection/counting model | High | Most accurate; needs a separate model |
-| **B** | Map `(class, confidence)` → representative count | Low | Approximate but keeps existing model; no new ML work |
-| **C** | Decouple risk from count: `f(pest_type, confidence)` → `risk_level` | Medium | Cleanest conceptually; **changes §4 derivation rule** — requires MASTER revision first |
+No proper counting model available yet. Option B keeps the existing classifier,
+derives a representative `whitefly_count` from `(predicted_class, confidence)`,
+and feeds it into the unchanged `derive_risk_level()`. §4's derivation rule is
+**not modified** — no MASTER §4 revision required.
 
-> **Record the decision in MASTER §4 before touching code.** If Option C is
-> chosen, §4 changes and all three repos update together.
+**`estimate_whitefly_count(predicted_class, confidence)` mapping:**
+
+| Condition | Count | → `derive_risk_level()` |
+|-----------|-------|------------------------|
+| `Fresh_Leaf` (any confidence) | `0` | `LOW` |
+| Pest class, confidence ≥ 0.90 | `18` | `CRITICAL` |
+| Pest class, confidence ≥ 0.75 | `12` | `HIGH` |
+| Pest class, confidence ≥ 0.50 | `6` | `MEDIUM` |
+| Pest class, confidence < 0.50 | `3` | `LOW` (weak/ambiguous detection) |
+
+Note: the 0.75 boundary aligns with the gatekeeper threshold — anything the
+backend would re-verify maps to `MEDIUM` or below, which is conceptually
+appropriate. Replace with a real counting model (Option A) when available.
 
 ### What's bundled with [W1] once decided
 Per MASTER §11 guardrails — do these **in the same `/scan` edit**, not separately:

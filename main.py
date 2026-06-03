@@ -155,6 +155,33 @@ def derive_risk_level(whitefly_count) -> str:
         return "MEDIUM"
     return "LOW"
 
+
+def estimate_whitefly_count(predicted_class: str, confidence: float) -> int:
+    """Derive a representative whitefly count from classifier output (Option B).
+
+    The model is a classifier — it cannot count insects. This function maps
+    (predicted_class, confidence) to a count value that, when passed through
+    derive_risk_level(), produces an appropriate severity band.
+
+    Mapping (see CONTRACTS.md §11):
+      Fresh_Leaf (any confidence) → 0  → LOW
+      Pest, confidence >= 0.90   → 18 → CRITICAL
+      Pest, confidence >= 0.75   → 12 → HIGH
+      Pest, confidence >= 0.50   → 6  → MEDIUM
+      Pest, confidence <  0.50   → 3  → LOW  (weak/ambiguous detection)
+
+    Replace with a real counting model (Option A) when one is available.
+    """
+    if predicted_class == "Fresh_Leaf":
+        return 0
+    if confidence >= 0.90:
+        return 18   # CRITICAL band (16+)
+    if confidence >= 0.75:
+        return 12   # HIGH band (9–15)
+    if confidence >= 0.50:
+        return 6    # MEDIUM band (5–8)
+    return 3        # LOW band (0–4) — weak/ambiguous detection
+
 # =====================================================================
 # ASYNCHRONOUS HIGH-FIDELITY TRIAGE WORKER
 # =====================================================================
@@ -257,42 +284,41 @@ def get_risk_metrics(district: str = "Multan"):
 @app.post("/api/v1/scan")
 async def process_crop_scan(
     file: UploadFile = File(...),
-    latitude: Optional[float] = Form(0.0),   # Catch incoming GPS lat coordinates
-    longitude: Optional[float] = Form(0.0)   # Catch incoming GPS lon coordinates
+    latitude: Optional[float] = Form(None),  # null when GPS unavailable — NOT 0.0 (§3.1)
+    longitude: Optional[float] = Form(None)  # null when GPS unavailable — NOT 0.0 (§3.1)
 ):
     try:
-        # 1. Read the incoming byte stream from your phone app
+        # 1. Read the incoming byte stream from the phone app
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        
-        # 2. Run image through your live PyTorch tensor transformation array
+
+        # 2. Run image through the live PyTorch inference pipeline
         tensor = inference_transforms(image).unsqueeze(0).to(DEVICE)
-        
+
         with torch.no_grad():
             outputs = model(tensor)
             probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
             top_prob, top_idx = torch.max(probabilities, dim=0)
-            
+
         confidence = float(top_prob.item())
         prediction = CLASSES[top_idx.item()]
-        
-        # Determine notification messaging based on target evaluation
+
+        # [W1] Derive whitefly_count from (class, confidence) via Option B.
+        # estimate_whitefly_count() maps to a representative count so that
+        # derive_risk_level() produces a meaningful severity band.
+        count = estimate_whitefly_count(prediction, confidence)
+
+        # Canonical recommendations (§7)
         if prediction != "Fresh_Leaf":
-            action_en = "Apply targeted mitigation if pest status is confirmed."
+            action_en = "Apply targeted mitigation spray in morning or evening."
             action_ur = "سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔"
             pest_type = "Whitefly"
-            count = 12
         else:
-            action_en = "Crop healthy."
+            action_en = "Crop is healthy. No spray required."
             action_ur = "کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔"
             pest_type = "None"
-            count = 0
 
-        print(f"📡 [SCAN COMPUTED] Lat: {latitude}, Lon: {longitude} | Result: {prediction}")
-
-        # Note: When Antigravity updates your app to run the initial database INSERT, 
-        # these fields (latitude, longitude) will be included in that step, allowing 
-        # your background webhook to pass them right along to your triage worker!
+        print(f"📡 [SCAN COMPUTED] Lat: {latitude}, Lon: {longitude} | {prediction} | conf={confidence:.2f} count={count}")
 
         return {
             "status": "success",
@@ -304,8 +330,6 @@ async def process_crop_scan(
             "action_protocol": action_en,
             "recommendation_en": action_en,
             "recommendation_ur": action_ur,
-            
-            # Echo back coordinates to client for validation
             "latitude": latitude,
             "longitude": longitude
         }
