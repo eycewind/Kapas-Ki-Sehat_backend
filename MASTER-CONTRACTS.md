@@ -8,8 +8,26 @@
 > **Place a copy at the root of all three repos.** When a shared contract changes,
 > update this file first, then reconcile each repo's local CONTRACTS.md from it.
 >
-> **Version:** 2 · **Last merged from all three repos:** 2026-06-02
-> **Previous:** v1 (2026-06-01)
+> **Version:** 4 · **Last merged from all three repos:** 2026-06-03
+> **Previous:** v3 (2026-06-02), v2, v1
+
+---
+
+## What changed since v3
+
+- **Image-upload chain is fully verified live and CLOSED.** End-to-end test
+  passed: app uploaded a real JPEG to `leaf-images`, inserted a `diagnostic_logs`
+  row with real values + non-null `image_storage_path`, the backend gatekeeper
+  fired on a sub-0.75 scan (confirmed in console: `[MLOPS LIVE] … mapped to
+  Fresh_Leaf with 0.51 confidence`), and the dashboard reflected it. v2 issues
+  #1–5 are done.
+- **All three CONTRACTS.md were self-verified against live code (2026-06-03).**
+  The app's stale "current code" prose is corrected; backend and dashboard
+  confirmed line-by-line.
+- **Three new findings surfaced** (see §10): an orphaned `main.py` in the
+  dashboard repo, the Storage bucket MIME-type quirk, and `NGROK_URL` not being
+  read by backend code.
+- **Active work item is now solely real `whitefly_count`** (§11) — Part A is done.
 
 ---
 
@@ -37,7 +55,7 @@
          │ Supabase Realtime
          ▼
 ┌─ Next.js Dashboard ──────────────────────────────────────────────┐
-│  Read-only. Realtime on diagnostic_logs. Counts, map, MLOps.     │
+│  Read-only. Realtime on 4 tables. Counts, map, telemetry, MLOps. │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,16 +78,16 @@ A new row INSERT fires the backend webhook.
 | `id`                 | `uuid`             | NO       | Supabase | PK, auto-generated |
 | `device_id`          | `varchar`          | YES      | App      | FK → `farmers_profiles.device_id` |
 | `timestamp`          | `timestamptz`      | YES      | App      | Client event time (ISO-8601 UTC) |
-| `district`           | `varchar`          | **NO**   | App      | Required |
-| `whitefly_count`     | `integer`          | **NO**   | App      | Required. Real value from ML response |
+| `district`           | `varchar`          | **NO**   | App      | Required. Currently hardcoded `"Multan Belt"` (app TODO) |
+| `whitefly_count`     | `integer`          | **NO**   | App      | Required. Real value (see §11 — backend still stubs `12`) |
 | `risk_level`         | `varchar`          | **NO**   | App      | Required. Canonical enum — §4 |
 | `confidence_score`   | `numeric`          | **NO**   | App      | Required. Real `ScanResponse.confidence`, 0.0–1.0 |
-| `inference_time_ms`  | `integer`          | **NO**   | App      | Required. Actual measured duration |
-| `image_storage_path` | `text`             | YES      | App      | Object path in bucket `leaf-images` (§2) |
+| `inference_time_ms`  | `integer`          | **NO**   | App      | Required. Measured round-trip (includes network) |
+| `image_storage_path` | `text`             | YES      | App      | Bare object key `{device_id}/{epoch_ms}.jpg` — no bucket prefix, no leading slash. Null if upload failed |
 | `created_at`         | `timestamptz`      | YES      | Supabase | Auto |
 | `latitude`           | `double precision` | YES      | App      | GPS. `null` when unavailable — **NOT `0.0`** |
 | `longitude`          | `double precision` | YES      | App      | GPS. `null` when unavailable — **NOT `0.0`** |
-| `agricultural_belt`  | `varchar`          | YES      | App      | e.g. `"Southern Punjab"` |
+| `agricultural_belt`  | `varchar`          | YES      | App      | Currently `null` (app TODO: derive from district) |
 
 > ❌ NO `status` column. ❌ NO `image_url` column. Use `image_storage_path`.
 
@@ -78,7 +96,7 @@ A new row INSERT fires the backend webhook.
 | Column               | Type          | Nullable | Notes |
 |----------------------|---------------|----------|-------|
 | `id`                 | `uuid`        | NO       | PK |
-| `device_id`          | `varchar`     | **NO**   | Unique device identity (SHA-256 hash) |
+| `device_id`          | `varchar`     | **NO**   | Unique device identity (SHA-256 hash of ANDROID_ID + salt) |
 | `registered_at`      | `timestamptz` | YES      | |
 | `last_active_at`     | `timestamptz` | YES      | |
 | `app_version`        | `varchar`     | **NO**   | gradle `versionName` (currently `"1.0"`) |
@@ -121,23 +139,31 @@ A new row INSERT fires the backend webhook.
 | `stack_trace` | `text`        | YES      | |
 | `created_at`  | `timestamptz` | YES      | |
 
+> Dashboard reads the most recent 10 rows for the live telemetry console. No
+> component writes to this table yet — populating it is a future task.
+
 ---
 
 ## 2. Supabase Storage
 
-| Bucket        | App    | Backend | Purpose |
-|---------------|--------|---------|---------|
-| `leaf-images` | writes | reads   | Captured leaf images for ML re-verification |
+| Bucket        | App    | Backend | Purpose | Visibility |
+|---------------|--------|---------|---------|------------|
+| `leaf-images` | writes | reads   | Captured leaf images for ML re-verification | **Private** |
 
-- **App upload:** after `/api/v1/scan`, upload the JPEG, then store the resulting
-  object path in `diagnostic_logs.image_storage_path` on INSERT.
-- **Backend read:** gatekeeper downloads via `image_storage_path`. If null/empty
-  → **skip re-verification** (do not overwrite edge values).
+- **Object path format (FROZEN):** `{device_id}/{epoch_ms}.jpg` — a **bare object
+  key**, no bucket prefix, no leading slash.
+- **MIME restriction:** the bucket allows `image/*`. ⚠️ Do **not** narrow this to
+  `image/jpeg` — the app's `supabase-kt` Storage client uploads `ByteArray` as
+  `application/octet-stream`, which only `image/*` (wildcard) accepts. Narrowing
+  it would silently break uploads.
+- **App:** uploads after `/api/v1/scan`; stores the bare key in
+  `image_storage_path`. Upload is non-fatal — on failure it logs WARN and sends
+  `image_storage_path = null`.
+- **Backend:** `download_leaf_image()` resolves via `_storage_client`. Since the
+  bucket is **private**, the backend **must** use the service key — set
+  `SUPABASE_SERVICE_KEY` (see §8). If `image_storage_path` is null/empty → **skip
+  re-verification** (don't overwrite edge values).
 - Bucket name configurable via `SUPABASE_STORAGE_BUCKET` (default `leaf-images`).
-  `download_leaf_image()` tolerates a bare key, a bucket-prefixed key, or a full
-  public/signed URL.
-
-> **This chain is the current focus — see §11 for the coordinated work plan.**
 
 ---
 
@@ -146,11 +172,14 @@ A new row INSERT fires the backend webhook.
 ### 3.1 `POST /api/v1/scan` — Mobile → Backend
 `multipart/form-data`:
 
-| Field       | Type   | Required | Canonical |
-|-------------|--------|----------|-----------|
-| `file`      | binary | YES      | JPEG, `filename="scan_{epochMillis}.jpg"` |
-| `latitude`  | float  | NO       | `null` when unavailable — NOT `0.0` |
-| `longitude` | float  | NO       | `null` when unavailable — NOT `0.0` |
+| Field       | Type   | Required | Canonical | Backend now |
+|-------------|--------|----------|-----------|-------------|
+| `file`      | binary | YES      | JPEG, `filename="scan_{epochMillis}.jpg"` | ✅ |
+| `latitude`  | float  | NO       | `null` when unavailable | ⚠️ defaults `0.0` (held — §11) |
+| `longitude` | float  | NO       | `null` when unavailable | ⚠️ defaults `0.0` (held — §11) |
+
+> Note: the app already omits lat/lon when GPS is unavailable; the `0.0` default
+> is the backend's own `/scan` handling/logging, not what lands in the DB.
 
 **Success (`200`):**
 ```jsonc
@@ -160,15 +189,19 @@ A new row INSERT fires the backend webhook.
   "confidence": 0.87,               // 0.0–1.0, rounded 2dp
   "confidence_score": 0.87,         // duplicate of confidence
   "pest_type": "Whitefly",          // "Whitefly" | "None"
-  "whitefly_count": 12,             // ⚠️ backend hardcodes 12 — treat as estimate
+  "whitefly_count": 12,             // ⚠️ HARDCODED STUB — the v4 work item (§11)
   "action_protocol": "…",           // English (== recommendation_en)
-  "recommendation_en": "…",
+  "recommendation_en": "…",         // ⚠️ wording differs from §7 (held — §11)
   "recommendation_ur": "…",
   "latitude": 30.157,               // echoed
   "longitude": 71.524
 }
 ```
 **Error:** `{ "status": "error", "message": "<text>" }`
+
+**App `ScanResponse`** deserializes `status`, `prediction`, `confidence`,
+`confidence_score`, `pest_type`, `whitefly_count`, `recommendation_en`,
+`recommendation_ur`, all with safe defaults; `ignoreUnknownKeys = true`.
 
 > `/scan` does **not** write `diagnostic_logs`. The app INSERTs after the response.
 
@@ -177,9 +210,9 @@ A new row INSERT fires the backend webhook.
 {
   "type": "INSERT",            // INSERT | UPDATE | DELETE
   "table": "diagnostic_logs",
-  "schema": "public",          // key is "schema" NOT "schema_name"
+  "schema": "public",          // ✅ aliased: Pydantic maps "schema" → schema_name
   "record": { /* full diagnostic_logs row, all columns incl. nulls */ },
-  "old_record": null           // populated on UPDATE/DELETE
+  "old_record": null
 }
 ```
 **Responses:**
@@ -190,33 +223,31 @@ A new row INSERT fires the backend webhook.
 
 **Gatekeeper trigger:** fires only when `record.confidence_score < 0.75` (missing
 → defaults `1.0` → no trigger). Downloads image, re-runs ML, UPDATEs **only**
-`confidence_score` + `risk_level`. De-dup is in-memory, lost on restart.
+`confidence_score` + `risk_level`. ✅ Verified firing live 2026-06-03. De-dup is
+in-memory, lost on restart.
 
-### 3.3 `GET /api/v1/risk-metrics` — Dashboard/App → Backend
-**Canonical response:**
+> ⚠️ The fix for the `schema`/`schema_name` alias lives in the **backend** repo's
+> `main.py`. A **stale duplicate `main.py` exists in the dashboard repo** that
+> still has the old `schema_name` bug — see §10 #D1. That copy is orphaned and
+> should be deleted, not fixed.
+
+### 3.3 `GET /api/v1/risk-metrics` — Dashboard/App → Backend ✅ conforms
 ```jsonc
 {
-  "temperature": 37.0,         // numeric
-  "humidity": 42.0,            // numeric
-  "wind_speed": 14.0,          // numeric
+  "district": "MULTAN",
+  "temperature": 37.0, "humidity": 42.0, "wind_speed": 14.0,  // numeric
   "risk_level": "CRITICAL",    // canonical enum (§4)
-  "alert_text_en": "…",
-  "alert_text_ur": "…"
+  "alert_text_en": "…", "alert_text_ur": "…"
 }
 ```
-> ⚠️ **Backend currently deviates:** returns strings (`"37°C"`/`"42%"`/`"14 km/h"`)
-> and `risk_level: "CRITICAL WHITEFLY RISK"`. Neither app nor dashboard consumes
-> this endpoint yet, so the fix is safe to make on the backend side first.
+All values are stubs until wired to real weather/telemetry. Not yet consumed by
+app or dashboard.
 
-### 3.4 `POST /api/v1/chat` — App → Backend
-**Canonical request (JSON):**
-```jsonc
-{ "message": "سفید مکھی کا علاج کیسے کریں", "language": "ur" }
-```
+### 3.4 `POST /api/v1/chat` — App → Backend ✅ conforms
+**Request (JSON):** `{ "message": "…", "language": "ur" }`
 **Response:** `{ "reply": "…urdu text…" }`
-> ⚠️ **Backend currently deviates:** accepts `Form(...)` fields, not JSON. Expert
-> screen in the app is a static stub and does not call this yet — safe to align
-> backend → JSON before the app wires it up.
+Keyword matching: `مکھی`/`سفید` → spray timing; `پانی`/`آبپاشی` → irrigation;
+else → generic inspection. App Expert screen is a static stub, not yet wired.
 
 ---
 
@@ -224,27 +255,29 @@ A new row INSERT fires the backend webhook.
 
 > All components use exactly these values — **uppercase, no spaces.**
 
-| Value      | Meaning                          | Whitefly count band |
-|------------|----------------------------------|---------------------|
-| `LOW`      | Healthy / below threshold        | 0–4                 |
-| `MEDIUM`   | Monitor; localized presence      | 5–8                 |
-| `HIGH`     | Action recommended               | 9–15                |
-| `CRITICAL` | Outbreak; immediate mitigation   | 16+                 |
+| Value      | Meaning                          | Whitefly count band | Marker color |
+|------------|----------------------------------|---------------------|--------------|
+| `LOW`      | Healthy / below threshold        | 0–4                 | `#6BE675` green |
+| `MEDIUM`   | Monitor; localized presence      | 5–8                 | `#F4B740` amber |
+| `HIGH`     | Action recommended               | 9–15                | `#F58B40` orange |
+| `CRITICAL` | Outbreak; immediate mitigation   | 16+                 | `#F45B5B` red |
+
+Unknown / non-canonical → gray `#9CA3AF` (dashboard).
 
 **Derivation rule (shared):** `derive_risk_level(whitefly_count)` maps to the
-bands above; `Fresh_Leaf` (healthy) → `LOW`. Because the image model is a
-*classifier* and does not count whiteflies, risk is derived from the
-app-supplied `whitefly_count`.
+bands above; `Fresh_Leaf` (healthy) → `LOW`.
 
-- App: must emit all four (currently only `CRITICAL`/`MEDIUM` — see §10).
-- Backend: gatekeeper now conforms via `derive_risk_level()`. `/risk-metrics`
-  still emits free text (§3.3).
-- Dashboard: handles all four with color-coded markers; `=== 'CRITICAL'` filter
-  is correct only for the single "Critical Outbreak Warnings" KPI.
+- App: ✅ `deriveRiskLevel(whiteflyCount)` emits all four; verified live.
+- Backend: ✅ gatekeeper uses `derive_risk_level()`; `/risk-metrics` canonical.
+- Dashboard: ✅ all four color-coded; `=== 'CRITICAL'` filter is correct only for
+  the single "Critical Outbreak Warnings" KPI.
 - DB: `risk_level varchar` unconstrained — recommend a CHECK constraint.
 
-**Marker colors (dashboard, `utils/types.ts`):** LOW `#6BE675`, MEDIUM `#F4B740`,
-HIGH `#F58B40`, CRITICAL `#F45B5B`, unknown → gray `#9CA3AF`.
+> ⚠️ **Live consequence (see §11):** because `whitefly_count` is hardcoded to `12`
+> by the backend, `derive_risk_level` always returns `HIGH` for any pest and `LOW`
+> for healthy. Confirmed in live `diagnostic_logs` data (rows show only HIGH at
+> count 12, LOW at count 0). `MEDIUM`/`CRITICAL` cannot occur until real counting
+> lands. The enum is correctly implemented everywhere but starved of varied input.
 
 ---
 
@@ -257,9 +290,8 @@ HIGH `#F58B40`, CRITICAL `#F45B5B`, unknown → gray `#9CA3AF`.
 | Saraiki  | `skr` | `SARAIKI`          | سرائیکی |
 | English  | `en`  | `ENGLISH`          | EN      |
 
-> ✅ Use **codes** (`ur/pa/skr/en`) on the wire: `farmers_profiles.preferred_language`,
-> `/chat` `language`. The app's `AppLanguage` enum may use full names internally
-> for UI state, but must map to codes before sending. ❌ Never send `"URDU"`.
+> ✅ Use **codes** (`ur/pa/skr/en`) on the wire. App sends `"ur"` (✅), currently
+> hardcoded rather than tracking the live UI selection (app TODO). ❌ Never `"URDU"`.
 
 ---
 
@@ -275,6 +307,7 @@ Yellowish_Leaf             → disease present, pest_type = "Whitefly"
 - **Model version:** `Flee-v1.0.4-stb` — active via `is_active_fleet_model = true`
 - **Confidence threshold:** `0.75` — gatekeeper re-verifies below this
 - **Confidence scale:** always `0.0–1.0`, never `0–100`. Dashboard renders `×100%`.
+- **The model is a classifier** — it does NOT count whiteflies. See §11.
 
 ---
 
@@ -282,64 +315,89 @@ Yellowish_Leaf             → disease present, pest_type = "Whitefly"
 
 Returned by `/api/v1/scan` as `recommendation_ur` / `recommendation_en`:
 
-| Condition | `recommendation_ur` | `recommendation_en` |
-|-----------|---------------------|---------------------|
+| Condition | `recommendation_ur` | `recommendation_en` (canonical) |
+|-----------|---------------------|---------------------------------|
 | Whitefly detected | سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔ | Apply targeted mitigation spray in morning or evening. |
 | Healthy | کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔ | Crop is healthy. No spray required. |
 
-> ⚠️ Backend `recommendation_en` currently reads "Apply targeted mitigation if pest
-> status is confirmed." — align to the canonical wording above.
+> ⚠️ Backend `/scan` currently returns `"Apply targeted mitigation if pest status
+> is confirmed."` — differs from canonical. Held (touches `/scan`; bundle with §11).
 
 ---
 
 ## 8. Environment Variables
 
-### Backend (`.env`)
+### 8.1 Supabase key format — RECONCILED (read before editing any `.env`)
+
+Supabase projects support **two coexisting key systems**: legacy JWT keys
+(`anon` / `service_role`, both `eyJh…`) and newer keys (`sb_publishable_…` /
+`sb_secret_…`). They work side by side.
+
+| Component | Key | Format | Why |
+|-----------|-----|--------|-----|
+| **App** | anon | **JWT `eyJh…`** | The Kotlin Storage module **rejects** `sb_publishable_…`. JWT anon required. |
+| **Dashboard** | anon | **JWT `eyJh…`** | Browser-exposed; same anon key as app. |
+| **Backend (DB)** | anon | JWT `eyJh…` | Standardize on the same anon key across all three. |
+| **Backend (private Storage reads)** | service | `service_role` JWT / `sb_secret_…` | **Required** — `leaf-images` is private. Set `SUPABASE_SERVICE_KEY`. |
+
+> ⚠️ Backend `.env` currently still lists `SUPABASE_KEY` as `sb_publishable_…`
+> (§10 #B1). Switch it to the JWT anon key. Do NOT "fix" the app/dashboard to use
+> `sb_publishable_…` — it breaks Storage uploads.
+
+### 8.2 Backend (`.env`)
 | Variable                  | Example                       | Notes |
 |---------------------------|-------------------------------|-------|
 | `SUPABASE_URL`            | `https://xxx.supabase.co`     | |
-| `SUPABASE_KEY`            | `sb_publishable_…`            | anon key; private-bucket reads may need service-role key |
+| `SUPABASE_KEY`            | JWT `eyJh…` (anon)            | DB + public Storage. **Switch from `sb_publishable_` per §8.1** |
+| `SUPABASE_SERVICE_KEY`    | `service_role` JWT / `sb_secret_…` | **Required** for private `leaf-images` reads |
 | `SUPABASE_STORAGE_BUCKET` | `leaf-images`                 | |
-| `MODEL_PATH`              | `./models/cottonace_stub.pth` | ✅ now read from env |
-| `NGROK_URL`               | `https://xxx.ngrok-free.dev`  | Update each ngrok restart; must match Supabase webhook portal |
-| `CORS_ALLOW_ORIGINS`      | `*` (dev)                     | ✅ CORS middleware now configured |
+| `MODEL_PATH`              | machine-specific path         | Set in local `.env` |
+| `NGROK_URL`               | `https://xxx.ngrok-free.dev`  | **NOT read by backend code.** Manual only: paste into the Supabase webhook portal after each ngrok restart |
+| `CORS_ALLOW_ORIGINS`      | `*` dev / explicit origin prod | ✅ CORS middleware configured |
 
-### Dashboard (`.env.local`)
+### 8.3 Dashboard (`.env.local`)
 | Variable                        | Notes |
 |---------------------------------|-------|
 | `NEXT_PUBLIC_SUPABASE_URL`      | Must match backend |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Same anon key (browser-exposed → relies on RLS) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | JWT anon key (§8.1); browser-exposed → relies on RLS |
 
-### Android app
-| Constant           | Current location               | Fix |
-|--------------------|--------------------------------|-----|
-| Backend base URL   | `NetworkUtil.kt` hardcoded LAN IP | Move to `BuildConfig` / `local.properties` |
-| Supabase URL + key | `CottonAceApplication.kt` hardcoded | Move to `local.properties` + Secrets plugin; rotate |
+### 8.4 Android app (`.env` via Secrets Gradle plugin → `BuildConfig`)
+| Variable             | Notes |
+|----------------------|-------|
+| `BACKEND_BASE_URL`   | ✅ externalized; **host only**, no path/key. Rotate ngrok here |
+| `SUPABASE_URL`       | ✅ externalized |
+| `SUPABASE_ANON_KEY`  | ✅ externalized; **JWT format required** (§8.1) |
+
+> ⚠️ `.env` lines must be `KEY=value` with no duplicated key prefix. A doubled
+> `BACKEND_BASE_URL=BACKEND_BASE_URL=https://…` line caused a URL-parse crash
+> (resolved 2026-06-03). Rebuild after editing — Secrets values bake into
+> `BuildConfig` at compile time.
 
 ---
 
-## 9. Cross-Repo Conformance Matrix
-
-Current state of each shared contract across the three repos (as of 2026-06-02).
+## 9. Cross-Repo Conformance Matrix (as of 2026-06-03, v4)
 
 | Contract point | App | Backend | Dashboard |
 |----------------|-----|---------|-----------|
-| No `status` / `image_url` column | ✅ | ✅ fixed | ✅ fixed |
-| `model_deployments` flat score columns | n/a | ✅ | ✅ fixed |
-| Webhook `schema` key (not `schema_name`) | n/a | ✅ aliased | n/a |
-| Risk enum 4-level | 🔴 emits only CRITICAL/MEDIUM | ✅ worker conforms | ✅ all 4 handled |
-| `/risk-metrics` numeric + canonical risk | not consumed | 🟠 still strings | not consumed |
-| `/chat` JSON body | not consumed | 🟠 still Form | not consumed |
-| GPS `null` not `0.0` | 🟠 sends 0.0 | 🟠 defaults 0.0 | ✅ validates both |
-| Image upload to Storage | 🔴 not implemented | ✅ ready to read | n/a |
-| Real `confidence_score` | 🔴 hardcoded 0.95 | ✅ returns real | reads real |
-| Real `whitefly_count` | 🔴 fabricated | 🟡 hardcodes 12 | reads value |
-| Real `inference_time_ms` | 🔴 hardcoded 150 | n/a (app supplies) | n/a |
-| `preferred_language` = `ur` | ✅ fixed | only `ur` referenced | n/a |
-| `app_version` = gradle version | ✅ fixed | n/a | n/a |
-| Error handling / robustness | ✅ round done | partial | ✅ round done |
+| No `status` / `image_url` column | ✅ | ✅ | ✅ |
+| `model_deployments` flat score columns | n/a | ✅ | ✅ |
+| Webhook `schema` key | n/a | ✅ aliased | ⚠️ orphaned stale `main.py` (§10 #D1) |
+| Risk enum 4-level implemented | ✅ | ✅ | ✅ |
+| Risk enum receives varied input | 🔴 starved (whitefly=12) | 🔴 source of stub | 🔴 shows only HIGH/LOW |
+| `/risk-metrics` numeric + canonical | not consumed | ✅ | not consumed |
+| `/chat` JSON body | not consumed | ✅ | not consumed |
+| GPS `null` not `0.0` | ✅ | 🟠 held (`/scan`) | ✅ |
+| Image upload to Storage | ✅ verified live | ✅ verified live | n/a (optional) |
+| Gatekeeper re-verification | n/a | ✅ verified firing | reflects updates |
+| Real `confidence_score` | ✅ | ✅ | ✅ |
+| Real `whitefly_count` | ✅ syncs what it gets | 🔴 hardcodes 12 | reads value |
+| Real `inference_time_ms` | ✅ measured | n/a | n/a |
+| `preferred_language` code `ur` | ✅ | references `ur` | n/a |
+| `app_version` = gradle version | ✅ | n/a | n/a |
+| Config externalized | ✅ | ✅ | ✅ |
+| Supabase key format (JWT) | ✅ | ⚠️ `.env` lists `sb_publishable_` (§10 #B1) | ✅ |
 
-Legend: ✅ conforms · 🟠 open, non-breaking · 🔴 open, blocks pipeline · 🟡 known limitation
+Legend: ✅ conforms · 🟠 open, non-breaking · 🔴 open, blocks correct behavior
 
 ---
 
@@ -347,121 +405,82 @@ Legend: ✅ conforms · 🟠 open, non-breaking · 🔴 open, blocks pipeline ·
 
 | # | Sev | Component | Issue |
 |---|-----|-----------|-------|
-| 1 | 🔴 | App | No Storage upload → `image_storage_path` null → gatekeeper never runs |
-| 2 | 🔴 | App | `confidence_score` hardcoded `0.95f` — use real `ScanResponse.confidence` |
-| 3 | 🔴 | App | `whitefly_count` fabricated — extend `ScanResponse`, use real value |
-| 4 | 🔴 | App | `inference_time_ms` hardcoded `150` — measure actual time |
-| 5 | 🔴 | App | `DiagnosticLogPayload` missing `image_storage_path`, `latitude`, `longitude`, `agricultural_belt` |
-| 6 | 🟠 | App | GPS defaults `0.0/0.0` — send `null` |
-| 7 | 🟠 | App | Emits only `CRITICAL`/`MEDIUM` — add `LOW`/`HIGH` via whitefly bands |
-| 8 | 🟡 | App | `diagnostic_logs` insert response not inspected (marks synced even on 0 rows) |
-| 9 | 🟡 | App | Home weather + Expert chat hardcoded — wire to `/risk-metrics` and `/chat` |
-| 10 | 🟠 | Backend | `/risk-metrics` returns strings + non-canonical `risk_level` |
-| 11 | 🟠 | Backend | `/chat` accepts Form, not JSON |
-| 12 | 🟠 | Backend | GPS defaults `0.0` in `/scan` |
-| 13 | 🟡 | Backend | `recommendation_en` wording differs from §7 |
-| 14 | 🟡 | Backend | `/scan` `whitefly_count` hardcoded `12` |
-| 15 | 🟡 | Backend | In-memory dedup lost on restart; no webhook signature check |
-| 16 | 🟠 | Dashboard | "Real-time Inference Sync" counts all rows (no date filter) |
-| 17 | 🟡 | Dashboard | Telemetry stream still fabricated |
-| 18 | 🟡 | Dashboard | Realtime only watches `diagnostic_logs` |
-| 19 | 🟡 | All | Supabase credentials committed — rotate, gitignore, consider RLS review |
+| W1 | 🔴 | Backend | `/scan` `whitefly_count` hardcoded `12` → risk always HIGH/LOW. **v4 work item (§11)** |
+| D1 | 🟠 | Dashboard | Orphaned stale `main.py` in dashboard repo (still has `schema_name` bug). **Delete it** — the real backend is in `KapasKiSehat_Backend`; this copy is dead and misleads contract syncs |
+| B1 | 🟠 | Backend | `.env` `SUPABASE_KEY` should be JWT anon, not `sb_publishable_` (§8.1) |
+| H1 | 🟠 | Backend | `/scan` GPS defaults `0.0` — change to `null` (held; bundle with §11) |
+| H2 | 🟠 | Backend | `recommendation_en` wording differs from §7 (held; bundle with §11) |
+| A1 | 🟡 | App | `agricultural_belt` synced as `null` — derive from district |
+| A2 | 🟡 | App | `district` hardcoded `"Multan Belt"` — derive from GPS reverse-geocode |
+| A3 | 🟡 | App | `preferred_language` correct code but hardcoded; track live UI selection |
+| A4 | 🟡 | App | Home weather + Expert chat are stubs — wire to `/risk-metrics` + `/chat` |
+| X1 | 🟡 | Backend | In-memory webhook dedup lost on restart; no webhook signature check |
+| X2 | 🟡 | Dashboard | Zod runtime validation deferred (would warn on stubbed rows until real data) |
+| X3 | 🟡 | All | `risk_level` has no DB CHECK constraint |
+| X4 | 🟡 | All | Confirm `.env` files gitignored; rotate any committed credentials |
 
 ---
 
-## 11. ▶ CURRENT CROSS-REPO WORK ITEM: The Image-Upload + Real-Data Chain
+## 11. ▶ CURRENT CROSS-REPO WORK ITEM (v4): Real `whitefly_count`
 
-**Why this one:** it is the keystone. Until the app uploads images and writes real
-values, the entire backend gatekeeper pipeline is dormant (issues #1–#5). The
-backend side is already built and waiting. This single chain converts the system
-from "looks healthy but verification never runs" to actually functioning
-end-to-end.
+**Part A (image-upload chain) is DONE and verified — no longer the work item.**
 
-**Repos involved:** App (primary), Backend (already ready), Dashboard (passive
-consumer), plus one Supabase setup step.
+**Why this is next:** the app faithfully syncs whatever `whitefly_count` it
+receives, but the backend hardcodes `12`. Since risk derives from the count,
+**every pest scan becomes HIGH and every healthy scan LOW** — `MEDIUM`/`CRITICAL`
+never occur. This is confirmed in live data. The 4-level enum all three repos
+implemented is functionally binary until this is fixed. Highest-value correctness
+item remaining.
 
-### The agreed contract for this chain (freeze before coding)
+### The contract decision to make FIRST (do not skip)
 
-These values are **fixed** for this work item. No repo may deviate without a
-new MASTER revision:
+The current model is a *classifier* that cannot count. Pick ONE approach and
+record it in this file before coding:
 
-1. **Bucket name:** `leaf-images` (matches backend default `SUPABASE_STORAGE_BUCKET`)
-2. **Object path format:** `{device_id}/{epoch_ms}.jpg`
-   - The app stores **exactly this** in `image_storage_path` — the bare object
-     key, **without** the bucket name prefix and **without** a leading slash.
-   - Rationale: backend `download_leaf_image()` tolerates several forms, but we
-     standardize on the bare key to avoid ambiguity. Pick one, document it, stick to it.
-3. **`ScanResponse` (app) must be extended** to deserialize at minimum:
-   `status`, `pest_type`, `confidence`, `confidence_score`, `whitefly_count`,
-   `recommendation_ur`, `recommendation_en`. All with safe defaults so a missing
-   field never crashes.
-4. **`DiagnosticLogPayload` (app) must add:** `image_storage_path`, `latitude`
-   (nullable), `longitude` (nullable), `agricultural_belt`.
-5. **Values written to `diagnostic_logs` must be real:**
-   - `confidence_score` ← `ScanResponse.confidence` (0.0–1.0)
-   - `whitefly_count` ← `ScanResponse.whitefly_count`
-   - `inference_time_ms` ← measured round-trip (app clock around the `/scan` call is acceptable for now; document that it includes network time)
-   - `risk_level` ← `derive_risk_level(whitefly_count)` using §4 bands
+- **Option A — Add a counting model.** A detection/counting model (or second
+  inference pass) yields a real integer count. Most accurate, most work.
+- **Option B — Derive count/bands from classifier confidence + class.** Map
+  `(class, confidence)` to a representative count or directly to a risk band.
+  Cheaper, approximate, keeps the existing model.
+- **Option C — Decouple risk from count.** Make `risk_level` a function of
+  `(pest_type, confidence)`; keep `whitefly_count` as a separate metric. Cleanest
+  conceptually but changes the §4 derivation rule all three repos depend on.
 
-### Ordering — do these in sequence to avoid breakage
+> Whichever is chosen, if it changes §4's derivation rule it becomes a MASTER
+> revision. **Decide here, write it into §4, then propagate** — no repo improvises.
 
-**Step 0 — Supabase (you, once, before any code):**
-- Create the `leaf-images` bucket if it doesn't exist.
-- Decide public vs private:
-  - If **private**, the backend `SUPABASE_KEY` must be a **service-role key** (the
-    anon key can't read private objects). Update backend `.env`.
-  - If **public**, anon key suffices but anyone with the URL can read images.
-- Add an RLS / storage policy allowing the app's anon key to **INSERT** (upload)
-  to the bucket.
-- ✅ Verify by manually uploading one file via the Supabase dashboard and
-  confirming the backend can download it with its configured key.
+### Frozen contracts while this is worked
 
-**Step 1 — App: extend the DTOs (no behavior change yet):**
-- Extend `ScanResponse` and `DiagnosticLogPayload` per the frozen contract above.
-- This is non-breaking: adding fields with defaults doesn't change what's sent yet.
-- ✅ Verify: app still compiles, existing scan flow still works.
+- `risk_level` enum values + bands in §4 stay as-is **unless Option C is chosen**,
+  in which case §4 is rewritten first and all three repos update together.
+- `diagnostic_logs` schema unchanged — `whitefly_count` stays `integer NOT NULL`.
+- `/scan` response keeps `whitefly_count` as an integer field regardless of option.
 
-**Step 2 — App: install Storage module + upload:**
-- Add the `Storage` module to the Supabase client in `CottonAceApplication.kt`.
-- After a successful `/scan`, upload the **real captured JPEG** (the file already
-  carried via `SharedViewModel`, not the old mock path) to
-  `leaf-images/{device_id}/{epoch_ms}.jpg`.
-- Store that exact object key for the upcoming insert.
-- ✅ Verify: a file appears in the bucket after a scan.
+### Guardrails per repo
 
-**Step 3 — App: write real values on INSERT:**
-- Populate `image_storage_path`, real `confidence_score`, real `whitefly_count`,
-  measured `inference_time_ms`, and `latitude`/`longitude` (null if no GPS).
-- ✅ Verify: a new `diagnostic_logs` row has a non-null `image_storage_path` and
-  realistic values.
-
-**Step 4 — End-to-end gatekeeper test (all repos together):**
-- Submit a scan whose `confidence_score < 0.75` (use a deliberately ambiguous
-  leaf image, or temporarily lower the threshold in a test).
-- ✅ Verify the backend webhook fires, downloads the image, re-runs ML, and
-  UPDATEs `confidence_score` + `risk_level`.
-- ✅ Verify the dashboard reflects the updated row via Realtime.
-
-### Guardrails — what each chat must NOT do
-
-- **App chat:** do not change the bucket name or path format. Do not start sending
-  `latitude=0.0`; send `null`. Do not remove `ignoreUnknownKeys` (backend may add
-  response fields later). Do not touch `risk_level` derivation bands — use §4.
-- **Backend chat:** do **not** modify `/scan`, the webhook handler, or
-  `download_leaf_image()` during this work item — the backend side is frozen and
-  ready. If a real bug surfaces, flag it here for a MASTER revision rather than
-  silently changing the read path. Do not change `SUPABASE_STORAGE_BUCKET` default.
-- **Dashboard chat:** no changes required for this item. Do **not** add a hard
-  dependency on `image_storage_path` being non-null (older rows have null). Treat
-  it as optional when displaying.
+- **Backend chat (primary):** replace the hardcoded `12`. For Option A, isolate
+  counting so `/scan`'s response shape is unchanged. Do NOT alter the webhook
+  handler or `download_leaf_image()`. You MAY bundle the held `/scan` cleanups
+  (GPS `0.0`→`null` [H1], `recommendation_en` wording [H2]) since you're already
+  in `/scan` — but call them out so app/dashboard expect the change.
+- **App chat:** no change for Option A/B (already syncs the real value). For
+  Option C, update `deriveRiskLevel` only after §4 is rewritten. Never re-introduce
+  a hardcoded count.
+- **Dashboard chat:** no change. Popup already shows `whitefly_count`; it will
+  start showing varied values. Don't hardcode any expected range.
 
 ### Definition of done
 
-A scan taken on the phone results in: (1) an image in `leaf-images`, (2) a
-`diagnostic_logs` row with real `confidence_score`/`whitefly_count`/
-`inference_time_ms` and a non-null `image_storage_path`, (3) for a sub-0.75
-confidence row, a backend gatekeeper UPDATE, and (4) the dashboard reflecting it
-live. When all four hold, mark issues #1–#5 closed and cut MASTER v3.
+Real (or properly-derived) `whitefly_count` flows end-to-end, and a set of test
+scans produces a spread across at least three of the four risk levels, visible as
+differently-colored markers on the dashboard. Then cut MASTER v5.
+
+### Side cleanup (independent, safe to do anytime)
+
+- **Delete the orphaned `main.py` from the dashboard repo (#D1).** It's dead code
+  with a stale bug; removing it prevents accidental deployment and stops it
+  polluting future contract verification.
+- **Switch backend `.env` `SUPABASE_KEY` to the JWT anon key (#B1).**
 
 ---
 
@@ -476,4 +495,7 @@ Before pushing changes that touch shared contracts:
 - [ ] `model_deployments` scores read as flat `f1_score / precision_score / recall_score`
 - [ ] No component sends `0.0` for missing GPS — use `null`
 - [ ] `image_storage_path` is the bare object key `{device_id}/{epoch_ms}.jpg`
-- [ ] Backend URL in app updated if ngrok restarted
+- [ ] Storage bucket MIME stays `image/*` (not `image/jpeg`)
+- [ ] Supabase keys are **JWT format** for the public surface (§8.1)
+- [ ] Backend URL in app is host-only, no doubled key prefix in `.env`
+- [ ] If `whitefly_count` derivation changed, §4 updated first, then all three repos
