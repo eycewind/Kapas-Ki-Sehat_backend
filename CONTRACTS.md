@@ -8,6 +8,8 @@
 > `MASTER-CONTRACTS.md` v2 (last merged **2026-06-02**). When MASTER is refreshed,
 > re-sync this file from it. Do not treat MASTER as live truth on its own —
 > **this file** governs backend changes.
+> **Last verified against `main.py`:** 2026-06-03 (every conformance claim
+> checked line-by-line against actual source).
 >
 > ML model: `Flee-v1.0.4-stb` (local, via ngrok). Stub: `mobilenet_v2` from
 > `cottonace_stub.pth`.
@@ -318,6 +320,10 @@ Yellowish_Leaf             → disease present, pest_type = "Whitefly"
 
 ## 9. Cross-Repo Conformance (backend-relevant, from MASTER v2 §9)
 
+> ⚠️ The **App** column below reflects MASTER v2 state (2026-06-02) and may be
+> stale — App fixes made after that date won't appear here until the next MASTER
+> refresh. Do not update App cells in this file; let the next MASTER sync correct them.
+
 | Contract point | App | Backend | Dashboard |
 |----------------|-----|---------|-----------|
 | No `status`/`image_url` column | ✅ | ✅ | ✅ |
@@ -344,7 +350,7 @@ Legend: ✅ conforms · 🟠 open/non-breaking · 🔴 blocks pipeline · 🟡 k
 | `SUPABASE_SERVICE_KEY`    | `sb_secret_…`                   | Optional. Used for private Storage reads by `_storage_client`. Set once `leaf-images` bucket is created |
 | `SUPABASE_STORAGE_BUCKET` | `leaf-images`                   | |
 | `MODEL_PATH`              | `D:\...\cottonace_stub.pth`     | Machine-specific. Set in local `.env` |
-| `NGROK_URL`               | `https://xxx.ngrok-free.dev`    | Update each restart; paste into Supabase webhook portal |
+| `NGROK_URL`               | `https://xxx.ngrok-free.dev`    | **Not read by backend code.** Manual step only: paste the ngrok URL into the Supabase webhook portal after each restart |
 | `CORS_ALLOW_ORIGINS`      | `*` (dev) / `https://dashboard.example.com` (prod) | |
 
 ---
