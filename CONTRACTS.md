@@ -152,8 +152,8 @@ Next.js dashboard (read-only): counts, map, telemetry, MLOps
   "action_protocol": "…",           // English (== recommendation_en)
   "recommendation_en": "…",         // English (§7)
   "recommendation_ur": "…",         // Urdu (§7)
-  "recommendation_pa": "…",         // Punjabi — ⚠️ placeholder = Urdu, pending verified translation (§7)
-  "recommendation_skr": "…",        // Saraiki — ⚠️ placeholder = Urdu, pending verified translation (§7)
+  "recommendation_pa": "…",         // Punjabi (§7, verified)
+  "recommendation_skr": "…",        // Saraiki (§7, verified)
   "latitude": 30.157,               // null when GPS unavailable
   "longitude": 71.524               // null when GPS unavailable
 }
@@ -275,25 +275,20 @@ Yellowish_Leaf             → disease present, pest_type = "Whitefly"
 |-------|-------|
 | `recommendation_en` | Apply targeted mitigation spray in morning or evening. |
 | `recommendation_ur` | سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔ |
-| `recommendation_pa` | ⚠️ **placeholder = Urdu** — pending verified translation |
-| `recommendation_skr` | ⚠️ **placeholder = Urdu** — pending verified translation |
+| `recommendation_pa` | چٹی مکھی دے تدارک لئی متعلقہ سپرے سویرے یا شام دے ویلے کرو۔ |
+| `recommendation_skr` | چٹی مکھی دے تدارک کیتے متعلقہ سپرے سویل یا شام دے ویلے کرو۔ |
 
 **Healthy:**
 | Field | Value |
 |-------|-------|
 | `recommendation_en` | Crop is healthy. No spray required. |
 | `recommendation_ur` | کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔ |
-| `recommendation_pa` | ⚠️ **placeholder = Urdu** — pending verified translation |
-| `recommendation_skr` | ⚠️ **placeholder = Urdu** — pending verified translation |
+| `recommendation_pa` | کپاہ دی فصل صحت مند اے۔ کسے سپرے دی لوڑ نئیں اے۔ |
+| `recommendation_skr` | کپاہ دی فصل صحت مند ہے۔ کہیں سپرے دی لوڑ کائنی۔ |
 
-> ⚠️ **`recommendation_pa` and `recommendation_skr` currently return the Urdu
-> string as a temporary placeholder** (4 placeholders total — Whitefly + Healthy ×
-> pa + skr). Each is marked in `main.py` with
-> `# TODO: replace with verified PA/SKR translation — placeholder is Urdu`.
-> Not machine-translated — awaiting verified native strings. The app should
-> already select the correct field per `AppLanguage` (§5); until the placeholders
-> are replaced, PA/SKR users see Urdu text (the same behavior as before, but now
-> via dedicated fields rather than a hard fallback).
+> ✅ All four languages are **verified native translations** (PA/SKR provided by a
+> native speaker, 2026-06-03). The app selects the correct field per `AppLanguage`
+> (§5). No placeholders remain.
 
 ---
 
