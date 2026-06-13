@@ -148,12 +148,14 @@ Next.js dashboard (read-only): counts, map, telemetry, MLOps
   "confidence": 0.87,               // 0.0–1.0, rounded 2dp
   "confidence_score": 0.87,         // duplicate of confidence
   "pest_type": "Whitefly",          // "Whitefly" | "None"
-  "whitefly_count": 12,             // ⚠️ HARDCODED STUB — §11 work item [W1]
+  "whitefly_count": 12,             // ✅ derived via estimate_whitefly_count (§11 Option B)
   "action_protocol": "…",           // English (== recommendation_en)
-  "recommendation_en": "…",         // ⚠️ wording differs from §7 — held, bundle with §11 [H2]
-  "recommendation_ur": "…",
-  "latitude": 30.157,
-  "longitude": 71.524
+  "recommendation_en": "…",         // English (§7)
+  "recommendation_ur": "…",         // Urdu (§7)
+  "recommendation_pa": "…",         // Punjabi — ⚠️ placeholder = Urdu, pending verified translation (§7)
+  "recommendation_skr": "…",        // Saraiki — ⚠️ placeholder = Urdu, pending verified translation (§7)
+  "latitude": 30.157,               // null when GPS unavailable
+  "longitude": 71.524               // null when GPS unavailable
 }
 ```
 **Error:** `{ "status": "error", "message": "<text>" }`
@@ -264,13 +266,34 @@ Yellowish_Leaf             → disease present, pest_type = "Whitefly"
 
 ## 7. Recommendation / Action Protocol
 
-| Condition | `recommendation_ur` | `recommendation_en` (canonical) |
-|-----------|---------------------|---------------------------------|
-| Whitefly | سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔ | Apply targeted mitigation spray in morning or evening. |
-| Healthy | کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔ | Crop is healthy. No spray required. |
+`/api/v1/scan` returns recommendations in **four languages**:
+`recommendation_en`, `recommendation_ur`, `recommendation_pa` (Punjabi),
+`recommendation_skr` (Saraiki) — one set for each case.
 
-> ⚠️ [H2] Backend `/scan` returns `"Apply targeted mitigation if pest status is
-> confirmed."` — differs from canonical. Held: bundle with §11 [W1].
+**Whitefly detected:**
+| Field | Value |
+|-------|-------|
+| `recommendation_en` | Apply targeted mitigation spray in morning or evening. |
+| `recommendation_ur` | سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔ |
+| `recommendation_pa` | ⚠️ **placeholder = Urdu** — pending verified translation |
+| `recommendation_skr` | ⚠️ **placeholder = Urdu** — pending verified translation |
+
+**Healthy:**
+| Field | Value |
+|-------|-------|
+| `recommendation_en` | Crop is healthy. No spray required. |
+| `recommendation_ur` | کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔ |
+| `recommendation_pa` | ⚠️ **placeholder = Urdu** — pending verified translation |
+| `recommendation_skr` | ⚠️ **placeholder = Urdu** — pending verified translation |
+
+> ⚠️ **`recommendation_pa` and `recommendation_skr` currently return the Urdu
+> string as a temporary placeholder** (4 placeholders total — Whitefly + Healthy ×
+> pa + skr). Each is marked in `main.py` with
+> `# TODO: replace with verified PA/SKR translation — placeholder is Urdu`.
+> Not machine-translated — awaiting verified native strings. The app should
+> already select the correct field per `AppLanguage` (§5); until the placeholders
+> are replaced, PA/SKR users see Urdu text (the same behavior as before, but now
+> via dedicated fields rather than a hard fallback).
 
 ---
 

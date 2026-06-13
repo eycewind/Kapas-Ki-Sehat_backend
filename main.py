@@ -308,14 +308,23 @@ async def process_crop_scan(
         # derive_risk_level() produces a meaningful severity band.
         count = estimate_whitefly_count(prediction, confidence)
 
-        # Canonical recommendations (§7)
+        # Canonical recommendations (§7). pa/skr are TEMPORARY placeholders
+        # (Urdu string) pending verified native translations — see CONTRACTS.md §7.
         if prediction != "Fresh_Leaf":
             action_en = "Apply targeted mitigation spray in morning or evening."
             action_ur = "سفید مکھی کے تدارک کے لیے متعلقہ اسپرے صبح یا شام کے وقت کریں۔"
+            # TODO: replace with verified PA/SKR translation — placeholder is Urdu
+            action_pa = action_ur
+            # TODO: replace with verified PA/SKR translation — placeholder is Urdu
+            action_skr = action_ur
             pest_type = "Whitefly"
         else:
             action_en = "Crop is healthy. No spray required."
             action_ur = "کپاس کی فصل صحت مند ہے۔ کسی اسپرے کی ضرورت نہیں ہے۔"
+            # TODO: replace with verified PA/SKR translation — placeholder is Urdu
+            action_pa = action_ur
+            # TODO: replace with verified PA/SKR translation — placeholder is Urdu
+            action_skr = action_ur
             pest_type = "None"
 
         print(f"📡 [SCAN COMPUTED] Lat: {latitude}, Lon: {longitude} | {prediction} | conf={confidence:.2f} count={count}")
@@ -330,6 +339,8 @@ async def process_crop_scan(
             "action_protocol": action_en,
             "recommendation_en": action_en,
             "recommendation_ur": action_ur,
+            "recommendation_pa": action_pa,    # ⚠️ placeholder = Urdu (§7)
+            "recommendation_skr": action_skr,  # ⚠️ placeholder = Urdu (§7)
             "latitude": latitude,
             "longitude": longitude
         }
